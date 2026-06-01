@@ -373,6 +373,8 @@ class CustomDataset(Dataset):
         summary_table_data.append(['global'] + ret_metrics_mean[2:] +
                                   [ret_metrics_mean[1]] +
                                   [ret_metrics_mean[0]])
+        background_index = kwargs.get('background_index',
+                                      getattr(self, 'background_index', 0))
         print_log('per class results:', logger)
         table = AsciiTable(class_table_data)
         print_log('\n' + table.table, logger=logger)
@@ -380,8 +382,24 @@ class CustomDataset(Dataset):
         table = AsciiTable(summary_table_data)
         print_log('\n' + table.table, logger=logger)
 
-        background_index = kwargs.get('background_index',
-                                      getattr(self, 'background_index', 0))
+        fg_indices = [
+            idx for idx in range(num_classes)
+            if idx != background_index
+        ]
+        fg_summary_table_data = [['Scope', 'fg_mIoU', 'fg_mAcc']]
+        if fg_indices:
+            fg_miou = np.round(
+                np.nanmean(ret_metrics[2][fg_indices]) * 100, 2)
+            fg_macc = np.round(
+                np.nanmean(ret_metrics[1][fg_indices]) * 100, 2)
+        else:
+            fg_miou = np.nan
+            fg_macc = np.nan
+        fg_summary_table_data.append(['foreground_only', fg_miou, fg_macc])
+        print_log('Foreground Summary (exclude background class):', logger)
+        table = AsciiTable(fg_summary_table_data)
+        print_log('\n' + table.table, logger=logger)
+
         object_eval_results = eval_object_metrics(
             results,
             gt_seg_maps,
@@ -400,6 +418,8 @@ class CustomDataset(Dataset):
         for i in range(1, len(summary_table_data[0])):
             eval_results[summary_table_data[0]
                          [i]] = summary_table_data[1][i] / 100.0
+        eval_results['fg_mIoU'] = fg_miou / 100.0
+        eval_results['fg_mAcc'] = fg_macc / 100.0
         for key, value in object_eval_results.items():
             eval_results[key] = value
         if mmcv.is_list_of(results, str):

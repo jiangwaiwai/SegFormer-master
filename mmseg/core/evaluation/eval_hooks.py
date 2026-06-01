@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 class EvalHook(Hook):
     """Evaluation hook."""
 
-    _default_greater_keys = {'mIoU', 'mAcc', 'aAcc', 'mDice', 'oIoU', 'P@0.5', 'P@0.6', 'P@0.7', 'P@0.8', 'P@0.9'}
+    _default_greater_keys = {'mIoU', 'mAcc', 'aAcc', 'mDice', 'fg_mIoU', 'fg_mAcc', 'oIoU', 'P@0.5', 'P@0.6', 'P@0.7', 'P@0.8', 'P@0.9'}
     _default_less_keys = {'loss'}
 
     def __init__(self,

@@ -19,6 +19,10 @@ def save_color_mask(result, palette, out_file):
     color_mask = np.zeros((seg.shape[0], seg.shape[1], 3), dtype=np.uint8)
     for label, color in enumerate(palette):
         color_mask[seg == label] = color
+    # mmcv.imwrite follows OpenCV's BGR convention, so convert from dataset RGB
+    # palette to BGR before writing to keep the saved mask consistent with the
+    # overlay visualization produced by show_result().
+    color_mask = color_mask[..., ::-1]
     mmcv.mkdir_or_exist(osp.dirname(out_file))
     mmcv.imwrite(color_mask, out_file)
 

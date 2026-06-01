@@ -208,7 +208,7 @@ class SwanlabHook(Hook):
         return config
 
     def _format_metric_name(self, key):
-        if key in {'mIoU', 'mDice', 'mAcc', 'aAcc', 'oIoU', 'P@0.5', 'P@0.6', 'P@0.7', 'P@0.8', 'P@0.9'}:
+        if key in {'mIoU', 'mDice', 'mAcc', 'aAcc', 'fg_mIoU', 'fg_mAcc', 'oIoU', 'P@0.5', 'P@0.6', 'P@0.7', 'P@0.8', 'P@0.9'}:
             return f'val/{key}'
         if key == 'lr':
             return 'train/lr'
