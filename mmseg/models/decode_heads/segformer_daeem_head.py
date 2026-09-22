@@ -5,22 +5,22 @@ from mmcv.cnn import ConvModule
 
 from mmseg.ops import resize
 from ..builder import HEADS
-from ..utils import DAEEMV2
+from ..utils import DAEEM
 from .decode_head import BaseDecodeHead
 from .segformer_head import MLP
 
 
 @HEADS.register_module()
-class SegFormerDAEEMV2Head(BaseDecodeHead):
+class SegFormerDAEEMHead(BaseDecodeHead):
     """SegFormer head with a shallow boundary enhancement side branch."""
 
     def __init__(self,
                  feature_strides,
-                 daeem_v2_cfg=None,
+                 daeem_cfg=None,
                  boundary_loss_weight=0.2,
                  boundary_dilation=3,
                  **kwargs):
-        super(SegFormerDAEEMV2Head, self).__init__(
+        super(SegFormerDAEEMHead, self).__init__(
             input_transform='multiple_select', **kwargs)
         assert len(feature_strides) == len(self.in_channels)
         assert min(feature_strides) == feature_strides[0]
@@ -38,9 +38,9 @@ class SegFormerDAEEMV2Head(BaseDecodeHead):
         self.linear_c1 = MLP(input_dim=c1_in_channels, embed_dim=embedding_dim)
         self.linear_edge = MLP(input_dim=c1_in_channels, embed_dim=embedding_dim)
 
-        self.daeem_v2 = DAEEMV2(
+        self.daeem = DAEEM(
             in_channels=c1_in_channels,
-            **({} if daeem_v2_cfg is None else dict(daeem_v2_cfg)))
+            **({} if daeem_cfg is None else dict(daeem_cfg)))
         self.shallow_fuse = ConvModule(
             in_channels=embedding_dim * 2,
             out_channels=embedding_dim,
@@ -60,7 +60,7 @@ class SegFormerDAEEMV2Head(BaseDecodeHead):
         c1, c2, c3, c4 = x
         n = c4.shape[0]
 
-        edge_feat, boundary_logits = self.daeem_v2(c1)
+        edge_feat, boundary_logits = self.daeem(c1)
 
         _c4 = self.linear_c4(c4).permute(0, 2, 1).reshape(
             n, -1, c4.shape[2], c4.shape[3])

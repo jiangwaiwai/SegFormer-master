@@ -2,17 +2,18 @@ import torch
 import torch.nn as nn
 
 
+def _make_group_norm(num_channels, max_groups=8):
+    groups = min(max_groups, num_channels)
+    while num_channels % groups != 0 and groups > 1:
+        groups -= 1
+    return nn.GroupNorm(groups, num_channels)
+
+
 class DAEEM(nn.Module):
-    """Direction-Aware Edge Enhancement Module.
+    """Shallow boundary enhancement branch for decoder-side fusion."""
 
-    The module follows a three-step design:
-    1. Multi-orientation perception with horizontal, vertical and local
-       context branches.
-    2. Interference suppression via an adaptive spatial reliability map.
-    3. Residual fusion back to the shallow feature stream.
-    """
-
-    def __init__(self, in_channels, kernel_size=7, dilation=2, reduction=4):
+    def __init__(self, in_channels, kernel_size=7, dilation=2, reduction=4,
+                 max_groups=8):
         super().__init__()
         if kernel_size % 2 == 0:
             raise ValueError('kernel_size must be odd for symmetric padding.')
@@ -28,7 +29,7 @@ class DAEEM(nn.Module):
                 padding=(0, pad),
                 groups=in_channels,
                 bias=False),
-            nn.BatchNorm2d(in_channels),
+            _make_group_norm(in_channels, max_groups=max_groups),
             nn.ReLU(inplace=True),
         )
         self.vertical_branch = nn.Sequential(
@@ -39,7 +40,7 @@ class DAEEM(nn.Module):
                 padding=(pad, 0),
                 groups=in_channels,
                 bias=False),
-            nn.BatchNorm2d(in_channels),
+            _make_group_norm(in_channels, max_groups=max_groups),
             nn.ReLU(inplace=True),
         )
         self.context_branch = nn.Sequential(
@@ -51,30 +52,41 @@ class DAEEM(nn.Module):
                 dilation=dilation,
                 groups=in_channels,
                 bias=False),
-            nn.BatchNorm2d(in_channels),
+            _make_group_norm(in_channels, max_groups=max_groups),
             nn.ReLU(inplace=True),
+        )
+
+        self.branch_selector = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels * 3, hidden_channels, kernel_size=1,
+                      bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, 3, kernel_size=1),
+            nn.Sigmoid(),
         )
 
         self.orientation_fusion = nn.Sequential(
             nn.Conv2d(in_channels * 3, in_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(in_channels),
+            _make_group_norm(in_channels, max_groups=max_groups),
             nn.ReLU(inplace=True),
         )
 
-        self.suppression = nn.Sequential(
+        self.confidence = nn.Sequential(
             nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1,
                       bias=False),
-            nn.BatchNorm2d(hidden_channels),
+            _make_group_norm(hidden_channels, max_groups=max_groups),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_channels, 1, kernel_size=1),
-            nn.Sigmoid(),
         )
 
-        self.residual_fusion = nn.Sequential(
+        self.refine = nn.Sequential(
             nn.Conv2d(in_channels * 2, in_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(in_channels),
+            _make_group_norm(in_channels, max_groups=max_groups),
             nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1,
+                      bias=False),
+            _make_group_norm(in_channels, max_groups=max_groups),
+            nn.ReLU(inplace=True),
         )
         self.gamma = nn.Parameter(torch.zeros(1))
 
@@ -83,11 +95,17 @@ class DAEEM(nn.Module):
         vertical = self.vertical_branch(x)
         context = self.context_branch(x)
 
-        oriented = self.orientation_fusion(
-            torch.cat([horizontal, vertical, context], dim=1))
-        suppression_map = self.suppression(oriented)
-        refined = oriented * suppression_map
+        stacked = torch.cat([horizontal, vertical, context], dim=1)
+        selector = self.branch_selector(stacked)
+        weighted = torch.cat([
+            horizontal * selector[:, 0:1],
+            vertical * selector[:, 1:2],
+            context * selector[:, 2:3],
+        ], dim=1)
 
-        fused = self.residual_fusion(torch.cat([x, refined], dim=1))
-        out = x + self.gamma * fused
-        return out, suppression_map
+        oriented = self.orientation_fusion(weighted)
+        boundary_logits = self.confidence(oriented)
+        confidence = torch.sigmoid(boundary_logits)
+        refined = self.refine(torch.cat([x, oriented * confidence], dim=1))
+        enhanced = x + self.gamma * refined
+        return enhanced, boundary_logits

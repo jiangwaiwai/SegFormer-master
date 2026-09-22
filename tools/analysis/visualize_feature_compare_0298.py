@@ -87,16 +87,9 @@ model = dict(
     pretrained=None,
     backbone=dict(
         type='mit_b0',
-        style='pytorch',
-        use_daeem=True,
-        daeem_stages=(1,),
-        daeem_cfg=dict(
-            kernel_size=7,
-            dilation=2,
-            reduction=4,
-        )),
+        style='pytorch'),
     decode_head=dict(
-        type='SegFormerHead',
+        type='SegFormerDAEEMHead',
         in_channels=[32, 64, 160, 256],
         in_index=[0, 1, 2, 3],
         feature_strides=[4, 8, 16, 32],
@@ -106,6 +99,14 @@ model = dict(
         norm_cfg=norm_cfg,
         align_corners=False,
         decoder_params=dict(embed_dim=256),
+        daeem_cfg=dict(
+            kernel_size=7,
+            dilation=2,
+            reduction=4,
+            max_groups=8,
+        ),
+        boundary_loss_weight=0.2,
+        boundary_dilation=3,
         loss_decode=dict(
             type='CrossEntropyLoss',
             use_sigmoid=False,

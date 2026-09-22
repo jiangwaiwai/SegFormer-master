@@ -1,5 +1,4 @@
 from .daeem import DAEEM
-from .daeem_v2 import DAEEMV2
 from .inverted_residual import InvertedResidual, InvertedResidualV3
 from .make_divisible import make_divisible
 from .res_layer import ResLayer
@@ -8,5 +7,5 @@ from .up_conv_block import UpConvBlock
 
 __all__ = [
     'ResLayer', 'SelfAttentionBlock', 'make_divisible', 'InvertedResidual',
-    'UpConvBlock', 'InvertedResidualV3', 'DAEEM', 'DAEEMV2'
+    'UpConvBlock', 'InvertedResidualV3', 'DAEEM'
 ]

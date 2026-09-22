@@ -12,7 +12,6 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg
 from mmseg.models.builder import BACKBONES
-from mmseg.models.utils import DAEEM
 from mmseg.utils import get_root_logger
 from mmcv.runner import load_checkpoint
 import math
@@ -205,15 +204,10 @@ class MixVisionTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dims=[64, 128, 256, 512],
                  num_heads=[1, 2, 4, 8], mlp_ratios=[4, 4, 4, 4], qkv_bias=False, qk_scale=None, drop_rate=0.,
                  attn_drop_rate=0., drop_path_rate=0., norm_layer=nn.LayerNorm,
-                 depths=[3, 4, 6, 3], sr_ratios=[8, 4, 2, 1],
-                 use_daeem=False, daeem_stages=(1,), daeem_cfg=None, **kwargs):
+                 depths=[3, 4, 6, 3], sr_ratios=[8, 4, 2, 1], **kwargs):
         super().__init__()
         self.num_classes = num_classes
         self.depths = depths
-        self.use_daeem = use_daeem
-        self.daeem_stages = tuple(sorted(set(daeem_stages))) if use_daeem else ()
-        daeem_cfg = {} if daeem_cfg is None else dict(daeem_cfg)
-
         # patch_embed
         self.patch_embed1 = OverlapPatchEmbed(img_size=img_size, patch_size=7, stride=4, in_chans=in_chans,
                                               embed_dim=embed_dims[0])
@@ -257,15 +251,6 @@ class MixVisionTransformer(nn.Module):
             sr_ratio=sr_ratios[3])
             for i in range(depths[3])])
         self.norm4 = norm_layer(embed_dims[3])
-
-        self.daeem_layers = nn.ModuleDict()
-        if self.use_daeem:
-            for stage in self.daeem_stages:
-                if stage < 1 or stage > 4:
-                    raise ValueError('daeem_stages only supports stages 1-4.')
-                self.daeem_layers[str(stage)] = DAEEM(
-                    in_channels=embed_dims[stage - 1], **daeem_cfg)
-        self.last_daeem_maps = {}
 
         # classification head
         # self.head = nn.Linear(embed_dims[3], num_classes) if num_classes > 0 else nn.Identity()
@@ -324,23 +309,12 @@ class MixVisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def _apply_daeem(self, stage, x, B, H, W):
-        if str(stage) not in self.daeem_layers:
-            return x
-        C = x.shape[-1]
-        x_2d = x.permute(0, 2, 1).reshape(B, C, H, W)
-        x_refined, suppression_map = self.daeem_layers[str(stage)](x_2d)
-        self.last_daeem_maps[stage] = suppression_map
-        return x_refined.reshape(B, C, -1).permute(0, 2, 1)
-
     def forward_features(self, x):
         B = x.shape[0]
         outs = []
-        self.last_daeem_maps = {}
 
         # stage 1
         x, H, W = self.patch_embed1(x)
-        x = self._apply_daeem(stage=1, x=x, B=B, H=H, W=W)
         for i, blk in enumerate(self.block1):
             x = blk(x, H, W)
         x = self.norm1(x)
@@ -349,7 +323,6 @@ class MixVisionTransformer(nn.Module):
 
         # stage 2
         x, H, W = self.patch_embed2(x)
-        x = self._apply_daeem(stage=2, x=x, B=B, H=H, W=W)
         for i, blk in enumerate(self.block2):
             x = blk(x, H, W)
         x = self.norm2(x)
@@ -358,7 +331,6 @@ class MixVisionTransformer(nn.Module):
 
         # stage 3
         x, H, W = self.patch_embed3(x)
-        x = self._apply_daeem(stage=3, x=x, B=B, H=H, W=W)
         for i, blk in enumerate(self.block3):
             x = blk(x, H, W)
         x = self.norm3(x)
@@ -367,7 +339,6 @@ class MixVisionTransformer(nn.Module):
 
         # stage 4
         x, H, W = self.patch_embed4(x)
-        x = self._apply_daeem(stage=4, x=x, B=B, H=H, W=W)
         for i, blk in enumerate(self.block4):
             x = blk(x, H, W)
         x = self.norm4(x)
