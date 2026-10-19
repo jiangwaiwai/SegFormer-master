@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import DropPath
+from torch.utils.checkpoint import checkpoint
 
 try:
     from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
@@ -31,10 +32,8 @@ def selective_scan_pure_pytorch(u, delta, A, B, C, D=None):
     # Discretize continuous parameters A and B:
     # delta: (B, L, D_in, 1), A: (1, 1, D_in, N) -> dA: (B, L, D_in, N)
     dA = torch.exp(delta.unsqueeze(-1) * A.view(1, 1, d_inner, d_state))
-    # delta: (B, L, D_in, 1), B: (B, L, 1, N) -> dB: (B, L, D_in, N)
-    dB = delta.unsqueeze(-1) * B.unsqueeze(2)
-    # dBu: (B, L, D_in, N)
-    dBu = dB * u.unsqueeze(-1)
+    # Calculate dBu directly to save ~1.1 GB memory by not holding a separate dB tensor:
+    dBu = (delta * u).unsqueeze(-1) * B.unsqueeze(2)
 
     h = torch.zeros(batch, d_inner, d_state, device=u.device, dtype=u.dtype)
     ys = []
@@ -83,7 +82,8 @@ class MambaBlock(nn.Module):
                  dt_init_floor=1e-4,
                  drop_path=0.0,
                  norm_layer=nn.LayerNorm,
-                 bimamba=True):
+                 bimamba=True,
+                 use_checkpoint=True):
         super(MambaBlock, self).__init__()
         self.dim = dim
         self.d_state = d_state
@@ -92,6 +92,7 @@ class MambaBlock(nn.Module):
         self.d_inner = int(self.expand * self.dim)
         self.dt_rank = dt_rank or math.ceil(self.dim / 16)
         self.bimamba = bimamba
+        self.use_checkpoint = use_checkpoint
 
         # Pre-normalization
         self.norm = norm_layer(dim)
@@ -169,17 +170,7 @@ class MambaBlock(nn.Module):
         else:
             return selective_scan_pure_pytorch(u, delta, A, B_mat, C_mat, self.D)
 
-    def forward(self, x, H=None, W=None):
-        """Forward pass of Visual Mamba Block.
-
-        Args:
-            x (torch.Tensor): Input tokens of shape (B, N, C).
-            H (int, optional): Spatial height.
-            W (int, optional): Spatial width.
-
-        Returns:
-            torch.Tensor: Output tokens of shape (B, N, C).
-        """
+    def _forward(self, x, H=None, W=None):
         residual = x
         x = self.norm(x)
 
@@ -212,4 +203,10 @@ class MambaBlock(nn.Module):
         # Out-projection and residual connection
         out = self.out_proj(y)
         return residual + self.drop_path(out)
+
+    def forward(self, x, H=None, W=None):
+        """Forward pass of Visual Mamba Block with activation checkpointing."""
+        if self.use_checkpoint and self.training and x.requires_grad:
+            return checkpoint(self._forward, x, H, W)
+        return self._forward(x, H, W)
 
