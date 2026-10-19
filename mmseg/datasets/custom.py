@@ -322,110 +322,84 @@ class CustomDataset(Dataset):
 
         Args:
             results (list): Testing results of the dataset.
-            metric (str | list[str]): Metrics to be evaluated. 'mIoU' and
-                'mDice' are supported.
+            metric (str | list[str]): Metrics to be evaluated. Supports 'mIoU',
+                'mF1' (or 'mDice'). Default: 'mIoU'.
             logger (logging.Logger | None | str): Logger used for printing
                 related information during evaluation. Default: None.
 
         Returns:
-            dict[str, float]: Default metrics.
+            dict[str, float]: Evaluation metrics.
         """
-
         if isinstance(metric, str):
             metric = [metric]
+
+        # Normalize metric names: map 'mF1' to internal 'mDice' for computation
+        raw_metrics = ['mDice' if m == 'mF1' else m for m in metric]
+        if 'mDice' not in raw_metrics and ('mF1' in metric or len(metric) == 1):
+            raw_metrics = ['mIoU', 'mDice']
+
         allowed_metrics = ['mIoU', 'mDice']
-        if not set(metric).issubset(set(allowed_metrics)):
-            raise KeyError('metric {} is not supported'.format(metric))
+        if not set(raw_metrics).issubset(set(allowed_metrics)):
+            raise KeyError(f'metric {metric} is not supported')
+
         eval_results = {}
         gt_seg_maps = self.get_gt_seg_maps(efficient_test)
         if self.CLASSES is None:
             num_classes = len(
                 reduce(np.union1d, [np.unique(_) for _ in gt_seg_maps]))
+            class_names = tuple(range(num_classes))
         else:
             num_classes = len(self.CLASSES)
+            class_names = self.CLASSES
+
+        # ret_metrics: [all_acc, acc, iou, dice]
         ret_metrics = eval_metrics(
             results,
             gt_seg_maps,
             num_classes,
             self.ignore_index,
-            metric,
+            ['mIoU', 'mDice'],
             label_map=self.label_map,
             reduce_zero_label=self.reduce_zero_label)
-        class_table_data = [['Class'] + [m[1:] for m in metric] + ['Acc']]
-        if self.CLASSES is None:
-            class_names = tuple(range(num_classes))
-        else:
-            class_names = self.CLASSES
-        ret_metrics_round = [
-            np.round(ret_metric * 100, 2) for ret_metric in ret_metrics
-        ]
+
+        iou = ret_metrics[2]
+        f1 = ret_metrics[3]
+        miou = float(np.nanmean(iou) * 100)
+        mf1 = float(np.nanmean(f1) * 100)
+
+        # 1. Per-class Results Table: Class | IoU (%) | F1 (%)
+        class_table_data = [['Class', 'IoU (%)', 'F1 (%)']]
         for i in range(num_classes):
-            class_table_data.append([class_names[i]] +
-                                    [m[i] for m in ret_metrics_round[2:]] +
-                                    [ret_metrics_round[1][i]])
-        summary_table_data = [['Scope'] +
-                              ['m' + head
-                               for head in class_table_data[0][1:]] + ['aAcc']]
-        ret_metrics_mean = [
-            np.round(np.nanmean(ret_metric) * 100, 2)
-            for ret_metric in ret_metrics
-        ]
-        summary_table_data.append(['global'] + ret_metrics_mean[2:] +
-                                  [ret_metrics_mean[1]] +
-                                  [ret_metrics_mean[0]])
-        background_index = kwargs.get('background_index',
-                                      getattr(self, 'background_index', 0))
-        print_log('per class results:', logger)
+            c_name = class_names[i]
+            iou_str = f'{iou[i] * 100:.2f}' if not np.isnan(iou[i]) else 'nan'
+            f1_str = f'{f1[i] * 100:.2f}' if not np.isnan(f1[i]) else 'nan'
+            class_table_data.append([c_name, iou_str, f1_str])
+            eval_results[f'{c_name}.IoU'] = float(iou[i])
+            eval_results[f'{c_name}.F1'] = float(f1[i])
+
+        print_log('\nPer-class results:', logger=logger)
         table = AsciiTable(class_table_data)
         print_log('\n' + table.table, logger=logger)
-        print_log('Summary:', logger)
+
+        # 2. Global Summary Table: Scope | mIoU (%) | mF1 (%)
+        summary_table_data = [
+            ['Scope', 'mIoU (%)', 'mF1 (%)'],
+            ['global', f'{miou:.2f}', f'{mf1:.2f}']
+        ]
+        print_log('\nSummary:', logger=logger)
         table = AsciiTable(summary_table_data)
         print_log('\n' + table.table, logger=logger)
 
-        fg_indices = [
-            idx for idx in range(num_classes)
-            if idx != background_index
-        ]
-        fg_summary_table_data = [['Scope', 'fg_mIoU', 'fg_mAcc']]
-        if fg_indices:
-            fg_miou = np.round(
-                np.nanmean(ret_metrics[2][fg_indices]) * 100, 2)
-            fg_macc = np.round(
-                np.nanmean(ret_metrics[1][fg_indices]) * 100, 2)
-        else:
-            fg_miou = np.nan
-            fg_macc = np.nan
-        fg_summary_table_data.append(['foreground_only', fg_miou, fg_macc])
-        print_log('Foreground Summary (exclude background class):', logger)
-        table = AsciiTable(fg_summary_table_data)
-        print_log('\n' + table.table, logger=logger)
+        # Standard return dictionary for runner / checkpoints / wandb
+        eval_results['mIoU'] = miou / 100.0
+        eval_results['mF1'] = mf1 / 100.0
+        eval_results['mDice'] = mf1 / 100.0
 
-        object_eval_results = eval_object_metrics(
-            results,
-            gt_seg_maps,
-            self.ignore_index,
-            background_index=background_index,
-            label_map=self.label_map,
-            reduce_zero_label=self.reduce_zero_label)
-        object_table_data = [['Metric', 'Value']]
-        for key in ['P@0.5', 'P@0.6', 'P@0.7', 'P@0.8', 'P@0.9', 'oIoU']:
-            object_table_data.append(
-                [key, np.round(object_eval_results[key] * 100, 2)])
-        print_log('Object Summary (foreground vs background):', logger)
-        table = AsciiTable(object_table_data)
-        print_log('\n' + table.table, logger=logger)
-
-        for i in range(1, len(summary_table_data[0])):
-            eval_results[summary_table_data[0]
-                         [i]] = summary_table_data[1][i] / 100.0
-        eval_results['fg_mIoU'] = fg_miou / 100.0
-        eval_results['fg_mAcc'] = fg_macc / 100.0
-        for key, value in object_eval_results.items():
-            eval_results[key] = value
         if mmcv.is_list_of(results, str):
             for file_name in results:
                 os.remove(file_name)
         return eval_results
+
 
 
 

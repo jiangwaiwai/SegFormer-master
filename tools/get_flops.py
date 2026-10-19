@@ -1,4 +1,9 @@
 import argparse
+import os.path as osp
+import sys
+
+# Ensure repo root is on sys.path
+sys.path.insert(0, osp.abspath(osp.join(osp.dirname(__file__), '..')))
 
 from mmcv import Config
 from mmcv.cnn import get_model_complexity_info
@@ -33,45 +38,22 @@ def sra_flops(h, w, r, dim, num_heads):
 def get_tr_flops(net, input_shape):
     flops, params = get_model_complexity_info(net, input_shape, as_strings=False)
     _, H, W = input_shape
-    net = net.backbone
-    try:
-        stage1 = sra_flops(H // 4, W // 4,
-                           net.block1[0].attn.sr_ratio,
-                           net.block1[0].attn.dim,
-                           net.block1[0].attn.num_heads) * len(net.block1)
-        stage2 = sra_flops(H // 8, W // 8,
-                           net.block2[0].attn.sr_ratio,
-                           net.block2[0].attn.dim,
-                           net.block2[0].attn.num_heads) * len(net.block2)
-        stage3 = sra_flops(H // 16, W // 16,
-                           net.block3[0].attn.sr_ratio,
-                           net.block3[0].attn.dim,
-                           net.block3[0].attn.num_heads) * len(net.block3)
-        stage4 = sra_flops(H // 32, W // 32,
-                           net.block4[0].attn.sr_ratio,
-                           net.block4[0].attn.dim,
-                           net.block4[0].attn.num_heads) * len(net.block4)
-    except:
-        stage1 = sra_flops(H // 4, W // 4,
-                           net.block1[0].attn.squeeze_ratio,
-                           64,
-                           net.block1[0].attn.num_heads) * len(net.block1)
-        stage2 = sra_flops(H // 8, W // 8,
-                           net.block2[0].attn.squeeze_ratio,
-                           128,
-                           net.block2[0].attn.num_heads) * len(net.block2)
-        stage3 = sra_flops(H // 16, W // 16,
-                           net.block3[0].attn.squeeze_ratio,
-                           320,
-                           net.block3[0].attn.num_heads) * len(net.block3)
-        stage4 = sra_flops(H // 32, W // 32,
-                           net.block4[0].attn.squeeze_ratio,
-                           512,
-                           net.block4[0].attn.num_heads) * len(net.block4)
+    backbone = net.backbone
+    extra_flops = 0
+    stages = [('block1', 4), ('block2', 8), ('block3', 16), ('block4', 32)]
+    for stage_name, scale in stages:
+        blocks = getattr(backbone, stage_name, None)
+        if blocks is not None and len(blocks) > 0:
+            first_blk = blocks[0]
+            if hasattr(first_blk, 'attn'):
+                sr_ratio = getattr(first_blk.attn, 'sr_ratio', getattr(first_blk.attn, 'squeeze_ratio', 1))
+                dim = getattr(first_blk.attn, 'dim', 64)
+                num_heads = getattr(first_blk.attn, 'num_heads', 1)
+                extra_flops += sra_flops(H // scale, W // scale, sr_ratio, dim, num_heads) * len(blocks)
 
-    print(stage1 + stage2 + stage3 + stage4)
-    flops += stage1 + stage2 + stage3 + stage4
+    flops += extra_flops
     return flops_to_string(flops), params_to_string(params)
+
 
 def main():
 
@@ -85,11 +67,11 @@ def main():
         raise ValueError('invalid input shape')
 
     cfg = Config.fromfile(args.config)
-    cfg.model.pretrained = None
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = build_segmentor(
         cfg.model,
         train_cfg=cfg.get('train_cfg'),
-        test_cfg=cfg.get('test_cfg')).cuda()
+        test_cfg=cfg.get('test_cfg')).to(device)
     model.eval()
 
     if hasattr(model, 'forward_dummy'):

@@ -32,7 +32,7 @@ model = dict(
 
 # data
 data = dict(samples_per_gpu=16, workers_per_gpu=8)
-evaluation = dict(interval=500, metric='mIoU', save_best='mIoU')
+evaluation = dict(interval=500, metric=['mIoU', 'mF1'], save_best='mIoU')
 
 # optimizer
 optimizer = dict(_delete_=True, type='AdamW', lr=0.00024, betas=(0.9, 0.999), weight_decay=0.01,

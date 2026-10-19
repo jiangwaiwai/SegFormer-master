@@ -18,7 +18,7 @@ from common import (
 )
 
 
-VAL_METRICS = ["mIoU", "mAcc", "aAcc", "oIoU", "P@0.5", "P@0.6", "P@0.7", "P@0.8", "P@0.9"]
+VAL_METRICS = ["mIoU", "mF1"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,12 +51,12 @@ def write_val_csv(rows: List[Dict], out_csv: str) -> None:
 def plot_main_metrics(val: List[Dict], out_dir: str) -> None:
     iters = [x["iter"] for x in val]
     plt.figure()
-    for i, metric in enumerate(["mIoU", "mAcc", "aAcc", "oIoU"]):
-        vals = [x.get(metric, np.nan) for x in val]
+    for i, metric in enumerate(["mIoU", "mF1"]):
+        vals = [x.get(metric, x.get("mDice", np.nan)) for x in val]
         plt.plot(iters, vals, color=SCIENTIFIC_COLORS[i], marker="o", label=metric)
     plt.xlabel("Iteration")
     plt.ylabel("Score")
-    plt.title("Validation Main Metrics")
+    plt.title("Validation mIoU and mF1")
     plt.legend()
     save_figure(osp.join(out_dir, "val_main_metrics_curve.png"))
 
@@ -108,40 +108,47 @@ def parse_per_class_from_train_log(train_log: str) -> List[Dict]:
     if not osp.isfile(train_log):
         return []
 
-    row_re = re.compile(r"^\|\s*(?P<cls>[^|]+?)\s*\|\s*(?P<iou>[\d.]+)\s*\|\s*(?P<acc>[\d.]+)\s*\|$")
+    row_re = re.compile(r"^\|\s*(?P<cls>[^|]+?)\s*\|\s*(?P<iou>[\d.]+)\s*\|\s*(?P<second>[\d.]+)\s*\|$")
     iter_re = re.compile(r"Iter\(val\)\s+\[(?P<iter>\d+)\]")
 
     records: List[Dict] = []
     pending_rows: List[Tuple[str, float, float]] = []
     capturing = False
+    second_key = "F1"
 
     with open(train_log, "r", encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
-            if "per class results:" in line:
+            if "per-class results:" in line.lower() or "per class results:" in line.lower():
                 capturing = True
                 pending_rows = []
                 continue
 
             if capturing:
+                if "Acc" in line:
+                    second_key = "Acc"
+                elif "F1" in line:
+                    second_key = "F1"
+
                 m = row_re.match(line)
                 if m:
                     cls_name = m.group("cls").strip()
-                    if cls_name.lower() != "class":
+                    if cls_name.lower() not in ["class", "scope"]:
                         pending_rows.append(
-                            (cls_name, float(m.group("iou")), float(m.group("acc")))
+                            (cls_name, float(m.group("iou")), float(m.group("second")))
                         )
 
             iter_match = iter_re.search(line)
             if iter_match and pending_rows:
                 iter_id = int(iter_match.group("iter"))
-                for cls_name, iou, acc in pending_rows:
+                for cls_name, iou, sec_val in pending_rows:
                     records.append(
                         {
                             "iter": iter_id,
                             "class": cls_name,
                             "IoU": iou,
-                            "Acc": acc,
+                            second_key: sec_val,
+                            "F1": sec_val if second_key == "F1" else sec_val,
                         }
                     )
                 pending_rows = []
@@ -152,8 +159,9 @@ def parse_per_class_from_train_log(train_log: str) -> List[Dict]:
 def write_per_class_csv(records: List[Dict], out_csv: str) -> None:
     if not records:
         return
+    sec_key = "F1" if "F1" in records[0] else "Acc"
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["iter", "class", "IoU", "Acc"])
+        writer = csv.DictWriter(f, fieldnames=["iter", "class", "IoU", sec_key])
         writer.writeheader()
         writer.writerows(records)
 
@@ -165,7 +173,8 @@ def _build_matrix(records: List[Dict], key: str) -> Tuple[List[int], List[str], 
     c2i = {c: i for i, c in enumerate(classes)}
     t2i = {t: i for i, t in enumerate(iters)}
     for r in records:
-        arr[c2i[r["class"]], t2i[r["iter"]]] = r[key]
+        if key in r:
+            arr[c2i[r["class"]], t2i[r["iter"]]] = r[key]
     return iters, classes, arr
 
 
@@ -173,7 +182,8 @@ def plot_per_class_curves(records: List[Dict], out_dir: str) -> None:
     if not records:
         return
     iters, classes, iou_mat = _build_matrix(records, "IoU")
-    _, _, acc_mat = _build_matrix(records, "Acc")
+    sec_key = "F1" if any("F1" in r for r in records) else "Acc"
+    _, _, sec_mat = _build_matrix(records, sec_key)
 
     plt.figure()
     for i, cls_name in enumerate(classes):
@@ -194,23 +204,24 @@ def plot_per_class_curves(records: List[Dict], out_dir: str) -> None:
     for i, cls_name in enumerate(classes):
         plt.plot(
             iters,
-            acc_mat[i],
+            sec_mat[i],
             marker="o",
             color=SCIENTIFIC_COLORS[i % len(SCIENTIFIC_COLORS)],
             label=cls_name,
         )
     plt.xlabel("Iteration")
-    plt.ylabel("Acc (%)")
-    plt.title("Per-class Acc Curves")
+    plt.ylabel(f"{sec_key} (%)")
+    plt.title(f"Per-class {sec_key} Curves")
     plt.legend(ncol=2)
-    save_figure(osp.join(out_dir, "val_per_class_acc_curves.png"))
+    save_figure(osp.join(out_dir, f"val_per_class_{sec_key.lower()}_curves.png"))
 
 
 def plot_per_class_heatmaps(records: List[Dict], out_dir: str) -> None:
     if not records:
         return
     iters, classes, iou_mat = _build_matrix(records, "IoU")
-    _, _, acc_mat = _build_matrix(records, "Acc")
+    sec_key = "F1" if any("F1" in r for r in records) else "Acc"
+    _, _, sec_mat = _build_matrix(records, sec_key)
 
     fig, ax = plt.subplots(figsize=(12, 5))
     im = ax.imshow(iou_mat, aspect="auto", cmap="viridis")
@@ -225,16 +236,16 @@ def plot_per_class_heatmaps(records: List[Dict], out_dir: str) -> None:
     save_figure(osp.join(out_dir, "val_per_class_iou_heatmap.png"), tight=False)
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    im = ax.imshow(acc_mat, aspect="auto", cmap="magma")
+    im = ax.imshow(sec_mat, aspect="auto", cmap="magma")
     ax.set_yticks(range(len(classes)))
     ax.set_yticklabels(classes)
     ax.set_xticks(range(len(iters)))
     ax.set_xticklabels(iters, rotation=45)
-    ax.set_title("Per-class Acc Heatmap")
+    ax.set_title(f"Per-class {sec_key} Heatmap")
     ax.set_xlabel("Iteration")
     ax.set_ylabel("Class")
-    fig.colorbar(im, ax=ax, label="Acc (%)")
-    save_figure(osp.join(out_dir, "val_per_class_acc_heatmap.png"), tight=False)
+    fig.colorbar(im, ax=ax, label=f"{sec_key} (%)")
+    save_figure(osp.join(out_dir, f"val_per_class_{sec_key.lower()}_heatmap.png"), tight=False)
 
 
 def plot_best_vs_last_bar(records: List[Dict], val_rows: List[Dict], out_dir: str) -> None:
