@@ -150,7 +150,7 @@ class SwanlabHook(Hook):
                 model.train()
 
         gt_mask = ensure_label_map(
-            mmcv.imread(ann_path, flag='unchanged', backend='pillow'),
+            ann_path,
             getattr(dataset, 'COLOR_TO_CLASS', None),
             getattr(dataset, 'ignore_index', 255))
 

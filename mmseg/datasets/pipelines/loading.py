@@ -135,9 +135,15 @@ class LoadAnnotations(object):
         else:
             filename = results['ann_info']['seg_map']
         img_bytes = self.file_client.get(filename)
-        gt_semantic_seg = mmcv.imfrombytes(
-            img_bytes, flag='unchanged',
-            backend=self.imdecode_backend)
+        if self.color_to_class is not None:
+            import io
+            from PIL import Image
+            with Image.open(io.BytesIO(img_bytes)) as _img:
+                gt_semantic_seg = np.array(_img.convert('RGB'))
+        else:
+            gt_semantic_seg = mmcv.imfrombytes(
+                img_bytes, flag='unchanged',
+                backend=self.imdecode_backend)
         gt_semantic_seg = ensure_label_map(
             gt_semantic_seg, self.color_to_class)
         

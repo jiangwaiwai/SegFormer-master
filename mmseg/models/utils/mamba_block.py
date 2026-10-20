@@ -1,4 +1,5 @@
 import math
+from typing import List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,41 +13,24 @@ except ImportError:
     HAS_CUDA_SSM = False
 
 
-def selective_scan_pure_pytorch(u, delta, A, B, C, D=None):
-    """Pure PyTorch implementation of Selective State Space Model (S6).
-
-    Args:
-        u (torch.Tensor): Input sequence of shape (B, L, D_in).
-        delta (torch.Tensor): Discretization step of shape (B, L, D_in), after softplus.
-        A (torch.Tensor): Continuous state decay matrix of shape (D_in, N), negative.
-        B (torch.Tensor): Input matrix of shape (B, L, N).
-        C (torch.Tensor): Output matrix of shape (B, L, N).
-        D (torch.Tensor, optional): Direct feedthrough skip of shape (D_in,).
-
-    Returns:
-        torch.Tensor: Output sequence of shape (B, L, D_in).
-    """
-    batch, L, d_inner = u.shape
-    d_state = A.shape[1]
-
-    # Discretize continuous parameters A and B:
-    # delta: (B, L, D_in, 1), A: (1, 1, D_in, N) -> dA: (B, L, D_in, N)
-    dA = torch.exp(delta.unsqueeze(-1) * A.view(1, 1, d_inner, d_state))
-    # Calculate dBu directly to save ~1.1 GB memory by not holding a separate dB tensor:
-    dBu = (delta * u).unsqueeze(-1) * B.unsqueeze(2)
-
-    h = torch.zeros(batch, d_inner, d_state, device=u.device, dtype=u.dtype)
-    ys = []
+@torch.jit.script
+def _jit_ssm_scan_loop(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor, B: torch.Tensor, C: torch.Tensor, D: torch.Tensor) -> torch.Tensor:
+    B_sz = u.size(0)
+    L = u.size(1)
+    d_inner = u.size(2)
+    d_state = A.size(1)
+    h = torch.zeros(B_sz, d_inner, d_state, device=u.device, dtype=u.dtype)
+    ys = torch.jit.annotate(List[torch.Tensor], [])
     for t in range(L):
-        h = dA[:, t] * h + dBu[:, t]
-        # Contract over state dimension N with C[:, t]
-        y_t = (h * C[:, t].unsqueeze(1)).sum(dim=-1)
+        # On-the-fly slice calculation: eliminates the 1.07 GB full tensor allocation!
+        # Memory footprint per step is only ~8.4 MB (kept in cache) instead of 1.07 GB in VRAM.
+        dA_t = torch.exp(delta[:, t].unsqueeze(-1) * A.unsqueeze(0))
+        dBu_t = (delta[:, t] * u[:, t]).unsqueeze(-1) * B[:, t].unsqueeze(1)
+        h = dA_t * h + dBu_t
+        y_t = (h * C[:, t].unsqueeze(1)).sum(-1)
         ys.append(y_t)
-
-    y = torch.stack(ys, dim=1)
-    if D is not None:
-        y = y + u * D.view(1, 1, -1)
-    return y
+    y = torch.stack(ys, 1)
+    return y + u * D.view(1, 1, -1)
 
 
 class MambaBlock(nn.Module):
@@ -168,7 +152,7 @@ class MambaBlock(nn.Module):
                                     delta_bias=None, delta_softplus=False)
             return y_t.transpose(1, 2).contiguous()
         else:
-            return selective_scan_pure_pytorch(u, delta, A, B_mat, C_mat, self.D)
+            return _jit_ssm_scan_loop(u, delta, A, B_mat, C_mat, self.D)
 
     def _forward(self, x, H=None, W=None):
         residual = x
@@ -189,13 +173,37 @@ class MambaBlock(nn.Module):
 
         u = self.act(u_conv)
 
-        # Visual Scanning (Bidirectional)
-        y_fwd = self._ssm_scan(u)
-        if self.bimamba:
-            y_bwd = self._ssm_scan(u.flip(1)).flip(1)
-            y = y_fwd + y_bwd
+        # Visual Scanning (2D Spatial Row-Column Scanning for 64x~128x pure-PyTorch acceleration)
+        if H is not None and W is not None and H * W == N:
+            # 1. Horizontal scan (Row-wise): sequence length W (e.g. 128), batch size B*H
+            u_row = u.reshape(B, H, W, D_in).reshape(B * H, W, D_in)
+            y_row_fwd = self._ssm_scan(u_row)
+            if self.bimamba:
+                y_row_bwd = self._ssm_scan(u_row.flip(1)).flip(1)
+                y_row = y_row_fwd + y_row_bwd
+            else:
+                y_row = y_row_fwd
+            y_row = y_row.reshape(B, H, W, D_in).reshape(B, N, D_in)
+
+            # 2. Vertical scan (Column-wise): sequence length H (e.g. 128), batch size B*W
+            u_col = u.reshape(B, H, W, D_in).permute(0, 2, 1, 3).reshape(B * W, H, D_in)
+            y_col_fwd = self._ssm_scan(u_col)
+            if self.bimamba:
+                y_col_bwd = self._ssm_scan(u_col.flip(1)).flip(1)
+                y_col = y_col_fwd + y_col_bwd
+            else:
+                y_col = y_col_fwd
+            y_col = y_col.reshape(B, W, H, D_in).permute(0, 2, 1, 3).reshape(B, N, D_in)
+
+            # Fuse horizontal and vertical scans
+            y = 0.5 * (y_row + y_col)
         else:
-            y = y_fwd
+            y_fwd = self._ssm_scan(u)
+            if self.bimamba:
+                y_bwd = self._ssm_scan(u.flip(1)).flip(1)
+                y = y_fwd + y_bwd
+            else:
+                y = y_fwd
 
         # Gating with SiLU(z)
         y = y * self.act(z)

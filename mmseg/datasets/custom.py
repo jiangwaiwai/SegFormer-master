@@ -241,11 +241,8 @@ class CustomDataset(Dataset):
             if efficient_test:
                 gt_seg_map = seg_map
             else:
-                gt_seg_map = mmcv.imread(
-                    seg_map, flag='unchanged', backend='pillow')
                 gt_seg_map = ensure_label_map(
-                    gt_seg_map, self.COLOR_TO_CLASS, self.ignore_index)
-                
+                    seg_map, self.COLOR_TO_CLASS, self.ignore_index)
             gt_seg_maps.append(gt_seg_map)
         return gt_seg_maps
 

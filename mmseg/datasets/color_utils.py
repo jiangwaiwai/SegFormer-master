@@ -17,6 +17,16 @@ def color_mask_to_label_map(mask, color_to_class, ignore_index=255):
         raise ValueError(
             f'Expected an RGB(A) segmentation mask, got shape {mask.shape}.')
 
+    # Fail-safe BGR auto-correction:
+    # If the dataset expects Yellow (255, 255, 0) (e.g. segmentation1641 corrosion),
+    # but the array was read via OpenCV/MMCV default (BGR) where Yellow becomes Cyan [0, 255, 255],
+    # detect this and invert channels back to RGB.
+    if (255, 255, 0) in color_to_class:
+        has_bgr_yellow = np.any((mask[:, :, 0] == 0) & (mask[:, :, 1] == 255) & (mask[:, :, 2] == 255))
+        has_rgb_yellow = np.any((mask[:, :, 0] == 255) & (mask[:, :, 1] == 255) & (mask[:, :, 2] == 0))
+        if has_bgr_yellow and not has_rgb_yellow:
+            mask = mask[:, :, ::-1]
+
     label_map = np.full(mask.shape[:2], ignore_index, dtype=np.uint8)
     for color, class_id in color_to_class.items():
         label_map[np.all(mask == color, axis=-1)] = class_id
@@ -25,7 +35,20 @@ def color_mask_to_label_map(mask, color_to_class, ignore_index=255):
 
 def ensure_label_map(mask, color_to_class=None, ignore_index=255):
     """Return a 2D uint8 label map from either index or RGB(A) annotations."""
-    mask = np.asarray(mask)
+    if isinstance(mask, str):
+        from PIL import Image
+        with Image.open(mask) as _img:
+            if color_to_class is not None:
+                mask = np.array(_img.convert('RGB'))
+            else:
+                mask = np.array(_img)
+    elif hasattr(mask, 'convert'):
+        if color_to_class is not None:
+            mask = np.array(mask.convert('RGB'))
+        else:
+            mask = np.array(mask)
+    else:
+        mask = np.asarray(mask)
 
     if mask.ndim == 2:
         return mask.astype(np.uint8)

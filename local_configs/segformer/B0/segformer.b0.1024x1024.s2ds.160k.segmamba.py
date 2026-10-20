@@ -14,3 +14,11 @@ model = dict(
     decode_head=dict(
         type='SegFormerHead'))
 
+# 提高日志刷新频率（每 10 步打印一次，方便实时观察训练速度）
+log_config = dict(
+    interval=10,
+    hooks=[
+        dict(type='TextLoggerHook', by_epoch=False)
+    ])
+
+
