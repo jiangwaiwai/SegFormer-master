@@ -1,3 +1,8 @@
+# ---------------------------------------------------------------
+# Direction-Aware Edge Enhancement Module (DAEEM) Decode Head
+# Strictly aligned with Innovation Point 2 in the Project Proposal
+# Ablation Experiment Group 3: SegMamba + DAEEM Head
+# ---------------------------------------------------------------
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,7 +17,16 @@ from .segformer_head import MLP
 
 @HEADS.register_module()
 class SegFormerDAEEMHead(BaseDecodeHead):
-    """SegFormer head with a shallow boundary enhancement side branch."""
+    """SegFormer head with a Direction-Aware Edge Enhancement side branch.
+
+    Features:
+    1. Extracts multi-orientation edge features from shallow features (C1)
+       via 1x7 horizontal, 7x1 vertical, and 3x3 dilated convolutions.
+    2. Dynamically balances orientation branches using an adaptive selector.
+    3. Employs zero-initialized residual gating (shallow_gamma) to guarantee
+       stable training and non-negative transfer from pure SegMamba baseline.
+    4. Provides explicit multi-task auxiliary supervision via boundary_loss.
+    """
 
     def __init__(self,
                  feature_strides,
@@ -87,7 +101,9 @@ class SegFormerDAEEMHead(BaseDecodeHead):
         _c1 = _c1 + self.shallow_gamma * _edge
 
         fused = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1))
-        seg_logits = self.linear_pred(self.dropout(fused))
+        if self.dropout is not None:
+            fused = self.dropout(fused)
+        seg_logits = self.linear_pred(fused)
         return seg_logits, boundary_logits
 
     def forward(self, inputs):
