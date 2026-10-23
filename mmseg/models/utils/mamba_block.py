@@ -173,37 +173,40 @@ class MambaBlock(nn.Module):
 
         u = self.act(u_conv)
 
-        # Visual Scanning (2D Spatial Row-Column Scanning for 64x~128x pure-PyTorch acceleration)
+        # Visual Scanning (2D Spatial Row-Column Scanning with Batched Bidirectional Acceleration)
         if H is not None and W is not None and H * W == N:
             # 1. Horizontal scan (Row-wise): sequence length W (e.g. 128), batch size B*H
             u_row = u.reshape(B, H, W, D_in).reshape(B * H, W, D_in)
-            y_row_fwd = self._ssm_scan(u_row)
             if self.bimamba:
-                y_row_bwd = self._ssm_scan(u_row.flip(1)).flip(1)
-                y_row = y_row_fwd + y_row_bwd
+                u_row_bi = torch.cat([u_row, u_row.flip(1)], dim=0)
+                y_row_bi = self._ssm_scan(u_row_bi)
+                y_row_fwd, y_row_bwd = y_row_bi.chunk(2, dim=0)
+                y_row = y_row_fwd + y_row_bwd.flip(1)
             else:
-                y_row = y_row_fwd
+                y_row = self._ssm_scan(u_row)
             y_row = y_row.reshape(B, H, W, D_in).reshape(B, N, D_in)
 
             # 2. Vertical scan (Column-wise): sequence length H (e.g. 128), batch size B*W
             u_col = u.reshape(B, H, W, D_in).permute(0, 2, 1, 3).reshape(B * W, H, D_in)
-            y_col_fwd = self._ssm_scan(u_col)
             if self.bimamba:
-                y_col_bwd = self._ssm_scan(u_col.flip(1)).flip(1)
-                y_col = y_col_fwd + y_col_bwd
+                u_col_bi = torch.cat([u_col, u_col.flip(1)], dim=0)
+                y_col_bi = self._ssm_scan(u_col_bi)
+                y_col_fwd, y_col_bwd = y_col_bi.chunk(2, dim=0)
+                y_col = y_col_fwd + y_col_bwd.flip(1)
             else:
-                y_col = y_col_fwd
+                y_col = self._ssm_scan(u_col)
             y_col = y_col.reshape(B, W, H, D_in).permute(0, 2, 1, 3).reshape(B, N, D_in)
 
             # Fuse horizontal and vertical scans
             y = 0.5 * (y_row + y_col)
         else:
-            y_fwd = self._ssm_scan(u)
             if self.bimamba:
-                y_bwd = self._ssm_scan(u.flip(1)).flip(1)
-                y = y_fwd + y_bwd
+                u_bi = torch.cat([u, u.flip(1)], dim=0)
+                y_bi = self._ssm_scan(u_bi)
+                y_fwd, y_bwd = y_bi.chunk(2, dim=0)
+                y = y_fwd + y_bwd.flip(1)
             else:
-                y = y_fwd
+                y = self._ssm_scan(u)
 
         # Gating with SiLU(z)
         y = y * self.act(z)

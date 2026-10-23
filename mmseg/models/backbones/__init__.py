@@ -10,9 +10,11 @@ from .unet import UNet
 
 from .mix_transformer import *
 from .segmamba import SegMamba
+from .d_segmamba import DSegMamba
 
 __all__ = [
     'ResNet', 'ResNetV1c', 'ResNetV1d', 'ResNeXt', 'HRNet', 'FastSCNN',
     'ResNeSt', 'MobileNetV2', 'UNet', 'CGNet', 'MobileNetV3', 'SegMamba',
+    'DSegMamba',
 ]
 
